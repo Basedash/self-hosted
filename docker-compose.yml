@@ -8,17 +8,44 @@ services:
     env_file: ./docker.env
     ports:
       - "5000:5000"
+    restart: unless-stopped
   db:
     container_name: basedash-db
-    image: basedash/db
-    build:
-      context: .
-      dockerfile: Dockerfile.db
+    image: postgres:12.2
     restart: always
     ports:
       - '5432:5432'
     env_file: ./docker.env
     volumes:
       - db:/var/lib/postgresql/data
+  nginx:
+    image: nginx:mainline-alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/lib/letsencrypt
+      - web-root:/var/www/html
+      - dhparam:/etc/ssl/certs
+    depends_on:
+      - app
+  certbot:
+    image: certbot/certbot
+    depends_on:
+      - nginx
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
+      - web-root:/var/www/html
+    # Replace with your domain name and replace --staging with --force-renewal after initial certificate has been issues
+    command: certonly --webroot --webroot-path=/var/www/html --email your-email@domain.com --agree-tos --no-eff-email --staging -d basedash.fm
 volumes:
   db:
+  certbot-etc:
+  certbot-var:
+  dhparam:
+  web-root:
