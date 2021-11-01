@@ -2,7 +2,7 @@
 
 postgresPassword=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
 jwtKey=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 256 | head -n 1)
-cryptoKey=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 256 | head -n 1)
+cryptoKey=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
 publicIpAddress=$(dig +short myip.opendns.com @resolver1.opendns.com)
 
 echo "Generating random values for some environment variables..."
