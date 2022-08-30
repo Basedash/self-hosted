@@ -1,0 +1,345 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  Environment:
+    Type: String
+    Description: Environment string sent to cloudwatch logs
+  SubnetId:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select at least two subnets in your selected VPC
+  Cluster:
+    Type: String
+    Description: ECS cluster to put service in
+  Image:
+    Type: String
+    Description: Docker image to use in the service
+  DesiredCount:
+    Type: Number
+    Description: Default number of tasks to run
+  MaximumPercent:
+    Type: Number
+    Description: Maximum percentage of tasks to run during a deployment
+    Default: 150
+  MinimumHealthyPercent:
+    Type: Number
+    Default: 50
+    Description: Minimum percentage of tasks to run during a deployment
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select a VPC that allows instances access to the Internet
+  BasedashLicenseKey:
+    Type: String
+    Description: Basedash self-hosted license key
+  AuthyApiKey:
+    Type: String
+    Description: Authy API key for 2FA
+  SendgridApiKey:
+    Type: String
+    Description: Sendgrid API key for emails
+  GoogleOauthClientId:
+    Type: String
+    Description: Google Oauth client ID for Google sign-in
+  SlackClientId:
+    Type: String
+    Description: Slack client ID for Slack notifications
+  SlackClientSecret:
+    Type: String
+    Description: Slack client secret for Slack notifications
+  InsecureCookie:
+    Type: String
+    Default: "true"
+    Description: Should be false if serving over HTTPS
+
+Resources:
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [" ", [!Ref 'AWS::StackName', 'load balancer security group']]
+      VpcId: !Ref 'VpcId'
+
+  GlobalHttpInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'ALBSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      CidrIp: '0.0.0.0/0'
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [ECSLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [" ", [!Ref 'AWS::StackName', 'database security group']]
+
+  BasedashECSPostgresInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt [RDSSecurityGroup, GroupId]
+      IpProtocol: tcp
+      FromPort: '5432'
+      ToPort: '5432'
+      CidrIp: '0.0.0.0/0'
+
+  BasedashTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: 'basedash'
+      TaskRoleArn: !Ref 'BasedashTaskRole'
+      ContainerDefinitions:
+        - Name: 'basedash'
+          Cpu: 1024
+          Essential: true
+          Image: !Ref 'Image'
+          Memory: 2048
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'CloudwatchLogsGroup'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: "SERVICE_BASEDASH"
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: SELF_HOSTED
+              Value: "true"
+            - Name: BUCKET_ENDPOINT
+              Value: !GetAtt [S3Bucket, WebsiteURL]
+            - Name: BUCKET_NAME_IMAGES
+              Value: "images"
+            - Name: BUCKET_NAME_KEYS
+              Value: "keys"
+            - Name: AWS_ACCESS_KEY_ID
+              Value: !Ref IamUserCredentials
+            - Name: AWS_SECRET_ACCESS_KEY
+              Value: !GetAtt [IamUserCredentials, SecretAccessKey]
+            - Name: BASE_URL
+              Value: !GetAtt [ECSALB, DNSName]
+            - Name: AUTHY_API_KEY
+              Value: !Ref AuthyApiKey
+            - Name: SENDGRID_API_KEY
+              Value: !Ref SendgridApiKey
+            - Name: GOOGLE_OAUTH_CLIENT_ID
+              Value: !Ref GoogleOauthClientId
+            - Name: SLACK_CLIENT_ID
+              Value: !Ref SlackClientId
+            - Name: SLACK_CLIENT_SECRET
+              Value: !Ref SlackClientSecret
+            - Name: POSTGRES_DB
+              Value: basedash_production
+            - Name: POSTGRES_HOST
+              Value: !GetAtt [BasedashRDSInstance, Endpoint.Address]
+            - Name: POSTGRES_SSL_ENABLED
+              Value: "true"
+            - Name: POSTGRES_PORT
+              Value: "5432"
+            - Name: POSTGRES_USER
+              Value: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashRDSSecret, ':SecretString:username}}' ]]
+            - Name: POSTGRES_PASSWORD
+              Value: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashRDSSecret, ':SecretString:password}}' ]]
+            - Name: JWT_SECRET
+              Value: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashJWTSecret, ':SecretString:password}}' ]]
+            - Name: CRYPTO_KEY
+              Value: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashCryptoSecret, ':SecretString:password}}' ]]
+            - Name: BASEDASH_LICENSE_KEY
+              Value: !Ref BasedashLicenseKey
+            - Name: COOKIE_INSECURE
+              Value: !Ref InsecureCookie
+          PortMappings:
+            - ContainerPort: 5000
+              HostPort: 80
+          Command: ["/app/dockerScripts/migrateDbAndRunServer.sh"]
+
+  BasedashJWTSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the secret for Basedash JWTs'
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  BasedashCryptoSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is a cryptographic secret used for hashing passwords in Basedash'
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: 'password'
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  BasedashRDSSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the secret for the Basedash RDS instance'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "basedash"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+
+  BasedashRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: "80"
+      DBInstanceClass: "db.m4.large"
+      AllowMajorVersionUpgrade: true
+      Engine: postgres
+      EngineVersion: "12.10"
+      DBName: "basedash_production"
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashRDSSecret, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref BasedashRDSSecret, ':SecretString:password}}' ]]
+      Port: "5432"
+      PubliclyAccessible: true
+      VPCSecurityGroups: [!GetAtt [RDSSecurityGroup, GroupId]]
+
+  ECSALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join ['-', [!Ref 'AWS::StackName', 'lb']]
+      Scheme: "internet-facing"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+      Subnets: !Ref 'SubnetId'
+      SecurityGroups: [!Ref 'ALBSecurityGroup']
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: BasedashServiceRole
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref 'ECSTG'
+      LoadBalancerArn: !Ref 'ECSALB'
+      Port: '80'
+      Protocol: HTTP
+
+  ECSALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: ALBListener
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'ECSTG'
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref 'ALBListener'
+      Priority: 1
+
+  ECSTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ECSALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: '/api/checkHealth'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 4
+      Name: !Join ['-', [!Ref 'AWS::StackName', 'tg']]
+      Port: '80'
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VpcId'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+
+  BasedashECSservice:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      Cluster: !Ref 'Cluster'
+      DesiredCount: !Ref 'DesiredCount'
+      DeploymentConfiguration:
+        MaximumPercent: !Ref 'MaximumPercent'
+        MinimumHealthyPercent: !Ref 'MinimumHealthyPercent'
+      LoadBalancers:
+        - ContainerName: 'basedash'
+          ContainerPort: '5000'
+          TargetGroupArn: !Ref 'ECSTG'
+      Role: !Ref 'BasedashServiceRole'
+      TaskDefinition: !Ref 'BasedashTask'
+
+  BasedashServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: !Join ['-', ['Basedash', !Ref 'Environment', 'service-policy']]
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: [
+                  'elasticloadbalancing:DeregisterInstancesFromLoadBalancer',
+                  'elasticloadbalancing:DeregisterTargets',
+                  'elasticloadbalancing:Describe*',
+                  'elasticloadbalancing:RegisterInstancesWithLoadBalancer',
+                  'elasticloadbalancing:RegisterTargets',
+                  'ec2:Describe*',
+                  'ec2:AuthorizeSecurityGroupIngress']
+                Resource: '*'
+
+  BasedashTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ['ecs-tasks.amazonaws.com']
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies: []
+
+  S3Bucket:
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+    Description: Bucket for storing Basedash assets like avatar images and SSH keys for DB connections
+    Properties:
+      AccessControl: PublicRead
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  IamUser:
+    Type: AWS::IAM::User
+    Properties:
+      Path: /basedash/
+      UserName: !Ref AWS::StackName
+
+  IamUserCredentials:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      Status: Active
+      UserName: !Ref IamUser
+
+Outputs:
+  ECSALB:
+    Description: Your ALB DNS URL
+    Value: !GetAtt [ECSALB, DNSName]
+  S3Bucket:
+    Description: Created S3 bucket
+    Value: !Ref S3Bucket
