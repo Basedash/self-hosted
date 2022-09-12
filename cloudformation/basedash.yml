@@ -73,6 +73,7 @@ Resources:
 
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Retain
     Properties:
       GroupDescription: !Join [" ", [!Ref 'AWS::StackName', 'database security group']]
 
@@ -96,6 +97,9 @@ Resources:
           Essential: true
           Image: !Ref 'Image'
           Memory: 2048
+          DependsOn:
+            - Condition: 'HEALTHY'
+              ContainerName: 'rabbitmq'
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -108,11 +112,11 @@ Resources:
             - Name: SELF_HOSTED
               Value: "true"
             - Name: BUCKET_ENDPOINT
-              Value: !GetAtt [S3Bucket, WebsiteURL]
+              Value: !Join ['', ['s3.', !Ref 'AWS::Region', '.amazonaws.com']]
             - Name: BUCKET_NAME_IMAGES
-              Value: "images"
+              Value: !Ref S3ImageBucket
             - Name: BUCKET_NAME_KEYS
-              Value: "keys"
+              Value: !Ref S3KeyBucket
             - Name: AWS_ACCESS_KEY_ID
               Value: !Ref IamUserCredentials
             - Name: AWS_SECRET_ACCESS_KEY
@@ -149,10 +153,49 @@ Resources:
               Value: !Ref BasedashLicenseKey
             - Name: COOKIE_INSECURE
               Value: !Ref InsecureCookie
+            - Name: RABBITMQ_URL
+              Value: "amqp://172.17.0.1:5672"
           PortMappings:
             - ContainerPort: 5000
               HostPort: 80
           Command: ["/app/dockerScripts/migrateDbAndRunServer.sh"]
+        - Name: 'rabbitmq'
+          Cpu: 1024
+          Essential: true
+          Image: 'rabbitmq:3.8-management-alpine'
+          Memory: 1024
+          HealthCheck:
+            Command: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+            Interval: 30
+            Timeout: 30
+            Retries: 3
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'CloudwatchLogsGroup'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: "SERVICE_RABBITMQ"
+          PortMappings:
+            - ContainerPort: 5672
+              HostPort: 5672
+            - ContainerPort: 15672
+              HostPort: 15672
+          MountPoints:
+            - SourceVolume: 'rabbitmq-logs'
+              ContainerPath: '/var/log/rabbitmq'
+            - SourceVolume: 'rabbitmq-data'
+              ContainerPath: '/var/lib/rabbitmq'
+      Volumes:
+        - Name: 'rabbitmq-logs'
+          DockerVolumeConfiguration:
+            Driver: 'local'
+            Scope: 'shared'
+            Autoprovision: true
+        - Name: 'rabbitmq-data'
+          DockerVolumeConfiguration:
+            Driver: 'local'
+            Scope: 'shared'
+            Autoprovision: true
 
   BasedashJWTSecret:
     Type: AWS::SecretsManager::Secret
@@ -162,7 +205,7 @@ Resources:
         SecretStringTemplate: '{}'
         GenerateStringKey: 'password'
         PasswordLength: 16
-        ExcludeCharacters: '"@/\'
+        ExcludePunctuation: true
 
   BasedashCryptoSecret:
     Type: AWS::SecretsManager::Secret
@@ -182,11 +225,12 @@ Resources:
         SecretStringTemplate: '{"username": "basedash"}'
         GenerateStringKey: 'password'
         PasswordLength: 16
-        ExcludeCharacters: '"@/\'
+        ExcludePunctuation: true
 
 
   BasedashRDSInstance:
     Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain
     Properties:
       AllocatedStorage: "80"
       DBInstanceClass: "db.m4.large"
@@ -252,6 +296,13 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: '30'
+        # Stickiness is required for socket.io to work properly (https://socket.io/docs/v4/using-multiple-nodes)
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: 'lb_cookie'
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 604800
 
   BasedashECSservice:
     Type: AWS::ECS::Service
@@ -306,12 +357,11 @@ Resources:
       Path: /
       Policies: []
 
-  S3Bucket:
+  S3ImageBucket:
     DeletionPolicy: Retain
     Type: 'AWS::S3::Bucket'
-    Description: Bucket for storing Basedash assets like avatar images and SSH keys for DB connections
+    Description: Bucket for storing Basedash assets like avatar images
     Properties:
-      AccessControl: PublicRead
       PublicAccessBlockConfiguration:
         BlockPublicAcls: false
         BlockPublicPolicy: false
@@ -324,11 +374,38 @@ Resources:
       VersioningConfiguration:
         Status: Enabled
 
+  S3KeyBucket:
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+    Description: Bucket for storing Basedash assets like SSH keys for DB connections
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
   IamUser:
     Type: AWS::IAM::User
     Properties:
       Path: /basedash/
       UserName: !Ref AWS::StackName
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                  - 's3-object-lambda:*'
+                Resource: '*'
+          PolicyName: 'S3FullAccess'
 
   IamUserCredentials:
     Type: AWS::IAM::AccessKey
@@ -340,6 +417,3 @@ Outputs:
   ECSALB:
     Description: Your ALB DNS URL
     Value: !GetAtt [ECSALB, DNSName]
-  S3Bucket:
-    Description: Created S3 bucket
-    Value: !Ref S3Bucket
