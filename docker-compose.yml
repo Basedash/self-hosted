@@ -66,6 +66,8 @@ services:
     # Replace with your domain name and replace --staging with --force-renewal after initial certificate has been issues
     command: certonly --webroot --webroot-path=/var/www/html --email your-email@domain.com --agree-tos --no-eff-email --staging -d basedash.fm
 volumes:
+  rabbitmq-data:
+  rabbitmq-logs:
   db:
   certbot-etc:
   certbot-var:
