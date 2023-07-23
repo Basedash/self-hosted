@@ -1,4 +1,4 @@
-version: '3'
+version: "3"
 services:
   app:
     container_name: basedash-app
@@ -10,20 +10,20 @@ services:
         condition: service_healthy
     env_file: ./docker.env
     ports:
-      - "5000:5000"
+      - 5000:5000
     restart: unless-stopped
   rabbitmq:
     image: rabbitmq:3.8-management-alpine
-    container_name: 'rabbitmq'
+    container_name: rabbitmq
     ports:
       - 5672:5672
       - 15672:15672
     # A stable hostname is important to prevent the volume from continually growing on
     # every restart. See issue described here: https://stackoverflow.com/questions/63115192/stale-rabbitmq-data-queue-files-eating-up-disk
-    hostname: 'rabbitmq'
+    hostname: rabbitmq
     volumes:
-      - rabbitmq-data/:/var/lib/rabbitmq/
-      - rabbitmq-logs/:/var/log/rabbitmq
+      - rabbitmq-data:/var/lib/rabbitmq/
+      - rabbitmq-logs:/var/log/rabbitmq
     healthcheck:
       test: rabbitmq-diagnostics -q ping
       interval: 30s
@@ -34,12 +34,12 @@ services:
     image: postgres:12.2
     restart: always
     ports:
-      - '5432:5432'
+      - 5432:5432
     env_file: ./docker.env
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -48,8 +48,8 @@ services:
     container_name: nginx
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - 80:80
+      - 443:443
     volumes:
       - ./nginx:/etc/nginx/conf.d
       - certbot-etc:/etc/letsencrypt
