@@ -1,7 +1,5 @@
-docker.env
-
-.idea
-
-.vscode
-
 .DS_Store
+.idea
+.vscode
+docker.env
+docker.env.*
